@@ -1,22 +1,13 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import tensorflow as tf
 import numpy as np
 from PIL import Image
 import io
-from typing import List
-import os
 
-app = FastAPI()
-
-# Add CORS middleware to allow requests from your React frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # React app's default URL
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Initialize Flask app
+app = Flask(__name__)
+CORS(app)  # Enable CORS to allow requests from your React frontend
 
 # Load the saved model
 try:
@@ -26,11 +17,10 @@ except Exception as e:
     print(f"Error loading model: {e}")
     model = None
 
-async def process_image(image_file: UploadFile) -> dict:
+def process_image(image_file):
     try:
         # Read and validate the image
-        contents = await image_file.read()
-        image = Image.open(io.BytesIO(contents))
+        image = Image.open(io.BytesIO(image_file.read()))
         
         # Convert to grayscale if it isn't already
         if image.mode != 'L':
@@ -53,38 +43,41 @@ async def process_image(image_file: UploadFile) -> dict:
         
         return {
             "hasTumor": bool(confidence > 0.5),
-            "confidence": confidence,
-            "fileName": image_file.filename
+            "confidence": confidence
         }
         
     except Exception as e:
-        print(f"Error processing image {image_file.filename}: {e}")
-        raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
+        print(f"Error processing image: {e}")
+        raise ValueError(f"Error processing image: {str(e)}")
 
-@app.get("/")
-async def root():
+@app.route("/", methods=["GET"])
+def root():
     """Health check endpoint"""
-    return {"status": "alive", "model_loaded": model is not None}
+    return jsonify({"status": "alive", "model_loaded": model is not None})
 
-@app.post("/predict")
-async def predict_images(images: List[UploadFile] = File(...)):
+@app.route("/predict", methods=["POST"])
+def predict_images():
     if model is None:
-        raise HTTPException(status_code=500, detail="Model not loaded")
+        return jsonify({"error": "Model not loaded"}), 500
     
-    if not images:
-        raise HTTPException(status_code=400, detail="No images provided")
+    if "images" not in request.files:
+        return jsonify({"error": "No images provided"}), 400
     
     results = []
+    images = request.files.getlist("images")  # Support multiple images
     for image in images:
         try:
             # Validate file type
             if not image.content_type.startswith('image/'):
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"File {image.filename} is not an image"
-                )
+                results.append({
+                    "hasTumor": False,
+                    "confidence": 0.0,
+                    "error": f"File {image.filename} is not an image"
+                })
+                continue
             
-            result = await process_image(image)
+            result = process_image(image)
+            result["fileName"] = image.filename
             results.append(result)
             
         except Exception as e:
@@ -96,9 +89,8 @@ async def predict_images(images: List[UploadFile] = File(...)):
                 "fileName": image.filename
             })
     
-    return results
+    return jsonify(results)
 
 if __name__ == "__main__":
-    import uvicorn
-    print("Starting server...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("Starting Flask server...")
+    app.run(host="0.0.0.0", port=8000, debug=True)
